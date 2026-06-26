@@ -45,7 +45,8 @@ jobs:
       skip_cleanup: true
       test_case: T1-check-release
     permissions:
-      contents: read
+      contents: write
+      actions: write
 
   test-check-latest:
     if: contains(fromJSON('["all-fast","all","full-matrix","check-latest"]'), github.event.inputs.case || 'all-fast')
