@@ -57,7 +57,7 @@ jobs:
       skip_cleanup: true
       test_case: T2-check-latest
     permissions:
-      contents: read
+      contents: write
 
   test-inject-bad-tag:
     if: contains(fromJSON('["all-fast","all","full-matrix","inject-bad-tag"]'), github.event.inputs.case || 'all-fast')
@@ -69,7 +69,7 @@ jobs:
       skip_cleanup: true
       test_case: T3-inject-bad-tag
     permissions:
-      contents: read
+      contents: write
 
   test-inject-bad-tag-expect-fail:
     needs: [test-inject-bad-tag]
@@ -94,7 +94,7 @@ jobs:
       skip_cleanup: true
       test_case: T4-traversal
     permissions:
-      contents: read
+      contents: write
 
   test-inject-traversal-expect-fail:
     needs: [test-inject-traversal]
@@ -113,7 +113,7 @@ jobs:
       skip_cleanup: true
       test_case: T5-command
     permissions:
-      contents: read
+      contents: write
 
   test-inject-command-expect:
     needs: [test-inject-command]
