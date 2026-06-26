@@ -1,421 +1,257 @@
-name: Vaultwarden Smart Build v3
+name: Test Vaultwarden v3
 "on":
-  schedule:
-    - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
-      tag_choice:
-        description: Version
+      case:
+        description: Test case
         required: true
-        default: release
+        default: all-fast
         type: choice
-        options: [release, latest, custom]
-      tag:
-        description: Custom ref
-        required: false
-        default: ""
-      force_build:
-        description: Force build
-        required: false
-        default: false
-        type: boolean
-      skip_cleanup:
-        required: false
-        default: false
-        type: boolean
-      skip_release:
+        options:
+          - all-fast
+          - check-only
+          - check-release
+          - check-latest
+          - inject-bad
+          - smoke
+          - repeat
+          - cache
+          - full-matrix
+      run_full_build:
+        description: Allow Windows build (costs minutes)
         required: false
         default: false
         type: boolean
-  workflow_call:
-    inputs:
-      tag_choice:
+      test_version:
+        description: Test version tag
         required: false
-        default: release
-        type: string
-      tag:
-        required: false
-        default: ""
-        type: string
-      force_build:
-        required: false
-        default: false
-        type: boolean
-      skip_cleanup:
-        required: false
-        default: false
-        type: boolean
-      skip_release:
-        required: false
-        default: false
-        type: boolean
-      test_case:
-        required: false
-        default: ""
-        type: string
-    outputs:
-      should_build:
-        value: ${{ jobs.check.outputs.should_build }}
-      vaultwarden_version:
-        value: ${{ jobs.build.outputs.vaultwarden_version }}
-      vaultwarden_sha:
-        value: ${{ jobs.build.outputs.vaultwarden_sha }}
-      release_tag:
-        value: ${{ jobs.build.outputs.release_tag }}
-      web_vault_version:
-        value: ${{ jobs.build.outputs.web_vault_version }}
-      zip_size_mb:
-        value: ${{ jobs.build.outputs.zip_size_mb }}
+        default: "1.32.0"
+  schedule:
+    - cron: '0 6 * * *'
 
-concurrency:
-  group: vw-v3-${{ github.event.inputs.tag_choice || inputs.tag_choice || 'schedule' }}
-  cancel-in-progress: false
-
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  # ---- fast checks, dry_run=true guarantees no build job starts ----
+  check-release:
+    if: github.event_name == 'schedule' || contains(fromJSON('["all-fast","check-only","all","full-matrix","check-release"]'), github.event.inputs.case || 'all-fast')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: release
+      dry_run: true
+      test_case: T1-check-release
     permissions:
       contents: read
-    outputs:
-      should_build: ${{ steps.version_check.outputs.should_build }}
-      target_tag: ${{ steps.target_version.outputs.tag }}
-      tag_choice: ${{ steps.target_version.outputs.tag_choice }}
-      latest_tag: ${{ steps.get_latest_tag.outputs.latest_tag }}
-      force_build: ${{ steps.flags.outputs.force_build }}
-      skip_cleanup: ${{ steps.flags.outputs.skip_cleanup }}
-      skip_release: ${{ steps.flags.outputs.skip_release }}
-      test_case: ${{ steps.flags.outputs.test_case }}
+    secrets: inherit
+
+  check-latest:
+    if: contains(fromJSON('["all-fast","check-only","all","full-matrix","check-latest"]'), github.event.inputs.case || 'all-fast')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: latest
+      dry_run: true
+      test_case: T2-check-latest
+    permissions:
+      contents: read
+    secrets: inherit
+
+  # ---- injection tests – expect check job to FAIL ----
+  inject-bad:
+    if: contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad","inject-bad-tag"]'), github.event.inputs.case || 'all-fast')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: "bad;rm -rf /"
+      dry_run: true
+      test_case: T3-inject
+    permissions:
+      contents: read
+    secrets: inherit
+
+  inject-bad-assert:
+    needs: [inject-bad]
+    if: always() && contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad","inject-bad-tag"]'), github.event.inputs.case || 'all-fast')
+    runs-on: ubuntu-latest
     steps:
-      - name: Resolve inputs
-        id: flags
-        shell: bash
-        env:
-          CALL_TAG_CHOICE: ${{ inputs.tag_choice }}
-          CALL_TAG: ${{ inputs.tag }}
-          CALL_FORCE: ${{ inputs.force_build }}
-          CALL_SKIP_CLEANUP: ${{ inputs.skip_cleanup }}
-          CALL_SKIP_RELEASE: ${{ inputs.skip_release }}
-          CALL_TEST_CASE: ${{ inputs.test_case }}
-          DISP_TAG_CHOICE: ${{ github.event.inputs.tag_choice }}
-          DISP_TAG: ${{ github.event.inputs.tag }}
-          DISP_FORCE: ${{ github.event.inputs.force_build }}
-          DISP_SKIP_CLEANUP: ${{ github.event.inputs.skip_cleanup }}
-          DISP_SKIP_RELEASE: ${{ github.event.inputs.skip_release }}
-        run: |
-          set -euo pipefail
-          tag_choice="${CALL_TAG_CHOICE:-}"
-          [ -z "$tag_choice" ] && tag_choice="${DISP_TAG_CHOICE:-}"
-          [ -z "$tag_choice" ] && tag_choice="release"
-          tag="${CALL_TAG:-}"
-          [ -z "$tag" ] && tag="${DISP_TAG:-}"
-          test_case="${CALL_TEST_CASE:-}"
-          force_build="${CALL_FORCE:-}"
-          [ -z "$force_build" ] && force_build="${DISP_FORCE:-false}"
-          skip_cleanup="${CALL_SKIP_CLEANUP:-}"
-          [ -z "$skip_cleanup" ] && skip_cleanup="${DISP_SKIP_CLEANUP:-false}"
-          skip_release="${CALL_SKIP_RELEASE:-}"
-          [ -z "$skip_release" ] && skip_release="${DISP_SKIP_RELEASE:-false}"
-          force_build=$(echo "$force_build" | tr '[:upper:]' '[:lower:]')
-          skip_cleanup=$(echo "$skip_cleanup" | tr '[:upper:]' '[:lower:]')
-          skip_release=$(echo "$skip_release" | tr '[:upper:]' '[:lower:]')
-          [ "$force_build" = "true" ] || force_build=false
-          [ "$skip_cleanup" = "true" ] || skip_cleanup=false
-          [ "$skip_release" = "true" ] || skip_release=false
-          {
-            echo "tag_choice=$tag_choice"
-            echo "tag=$tag"
-            echo "force_build=$force_build"
-            echo "skip_cleanup=$skip_cleanup"
-            echo "skip_release=$skip_release"
-            echo "test_case=$test_case"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Get latest upstream
-        id: get_latest_tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          r=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest || true)
-          echo "latest_tag=$(echo "$r" | jq -r '.tag_name // empty')" >> "$GITHUB_OUTPUT"
-
-      - name: Intent
-        id: intent
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          C1: ${{ steps.flags.outputs.tag_choice }}
-          C2: ${{ steps.flags.outputs.tag }}
-        run: |
-          if [ "$EVENT_NAME" = "schedule" ]; then
-            echo "tag_choice=release" >> "$GITHUB_OUTPUT"
-            echo "custom_tag=" >> "$GITHUB_OUTPUT"
+      - run: |
+          r="${{ needs.inject-bad.result }}"
+          echo "inject-bad result=$r"
+          if [ "$r" = "failure" ]; then
+            echo "PASS injection rejected"
+            exit 0
           else
-            echo "tag_choice=$C1" >> "$GITHUB_OUTPUT"
-            echo "custom_tag=$C2" >> "$GITHUB_OUTPUT"
+            echo "FAIL expected failure, got $r"
+            exit 1
           fi
 
-      - name: Version check
-        id: version_check
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          TAG_CHOICE: ${{ steps.intent.outputs.tag_choice }}
-          LATEST_TAG: ${{ steps.get_latest_tag.outputs.latest_tag }}
-          REPO: ${{ github.repository }}
-          FORCE_BUILD: ${{ steps.flags.outputs.force_build }}
-        run: |
-          set -euo pipefail
-          should_build=true
-          reason=manual
-          if [ "$FORCE_BUILD" = "true" ]; then
-            should_build=true; reason=force
-          elif [ "$EVENT_NAME" = "schedule" ] || [ "$TAG_CHOICE" = "release" ]; then
-            latest="$LATEST_TAG"
-            [ -z "$latest" ] && exit 1
-            ver=${latest#v}
-            found=false
-            for p in 1 2; do
-              j=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$REPO/releases?per_page=100&page=$p" || echo '[]')
-              if echo "$j" | jq -r '.[].tag_name' | grep -Eq "^vw-win-v?$ver[.-]"; then found=true; break; fi
-            done
-            if [ "$found" = true ]; then should_build=false; reason="already built"; else should_build=true; reason=new; fi
-          fi
-          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
-          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+  inject-traversal:
+    if: contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-path-traversal","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: "../../etc/passwd"
+      dry_run: true
+      test_case: T4-traversal
+    permissions:
+      contents: read
+    secrets: inherit
 
-      - name: Target version
-        id: target_version
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          TAG_CHOICE: ${{ steps.intent.outputs.tag_choice }}
-          CUSTOM_TAG: ${{ steps.intent.outputs.custom_tag }}
-          LATEST_TAG: ${{ steps.get_latest_tag.outputs.latest_tag }}
-        run: |
-          set -euo pipefail
-          choice="$TAG_CHOICE"
-          [ "$EVENT_NAME" = "schedule" ] && choice=release
-          tag=""
-          case "$choice" in
-            release) tag="$LATEST_TAG"; [ -z "$tag" ] && exit 1 ;;
-            latest) tag="" ;;
-            custom)
-              tag="$CUSTOM_TAG"
-              [ -z "$tag" ] && exit 1
-              echo "$tag" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$' || exit 1
-              echo "$tag" | grep -Eq '(\.\.|//)|^[.-]|[-.]$' && exit 1 || true
-              ;;
-            *) exit 1 ;;
-          esac
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "tag_choice=$choice" >> "$GITHUB_OUTPUT"
+  inject-traversal-assert:
+    needs: [inject-traversal]
+    if: always() && contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-path-traversal","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          r="${{ needs.inject-traversal.result }}"
+          test "$r" = "failure" && echo "PASS" || { echo "FAIL $r"; exit 1; }
 
-  build:
-    needs: check
-    if: needs.check.outputs.should_build == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 120
+  inject-command:
+    if: contains(fromJSON('["all-fast","all","full-matrix","inject-command","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: "a`whoami`"
+      dry_run: true
+      test_case: T5-cmd
+    permissions:
+      contents: read
+    secrets: inherit
+
+  inject-command-assert:
+    needs: [inject-command]
+    if: always() && contains(fromJSON('["all-fast","all","full-matrix","inject-command","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          r="${{ needs.inject-command.result }}"
+          test "$r" = "failure" && echo "PASS" || { echo "FAIL $r"; exit 1; }
+
+  # ---- real builds – gated by run_full_build ----
+  smoke:
+    if: (github.event.inputs.run_full_build == 'true') && contains(fromJSON('["all","full-matrix","smoke","smoke-old-version"]'), github.event.inputs.case || '')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: ${{ github.event.inputs.test_version || '1.32.0' }}
+      force_build: true
+      skip_release: true
+      skip_cleanup: true
+      test_case: SMOKE
     permissions:
       contents: write
-    outputs:
-      vaultwarden_version: ${{ steps.get_version.outputs.vaultwarden_version }}
-      vaultwarden_sha: ${{ steps.get_version.outputs.vaultwarden_short_sha }}
-      web_vault_version: ${{ steps.webvault_version.outputs.web_vault_version }}
-      release_tag: ${{ steps.set_release_tag.outputs.release_tag }}
-      zip_size_mb: ${{ env.ZIP_SIZE_MB }}
-    env:
-      SKIP_RELEASE: ${{ needs.check.outputs.skip_release }}
-      SKIP_CLEANUP: ${{ needs.check.outputs.skip_cleanup }}
-      TEST_CASE: ${{ needs.check.outputs.test_case }}
-      OPENSSL_STATIC: 1
-      VCPKG_ROOT: C:\vcpkg
-      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+    secrets: inherit
+
+  smoke-assert:
+    needs: [smoke]
+    if: always() && github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","smoke","smoke-old-version"]'), github.event.inputs.case || '')
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-        with:
-          repository: dani-garcia/vaultwarden
-          ref: ${{ needs.check.outputs.target_tag }}
-          path: vaultwarden
-          fetch-depth: 0
-          persist-credentials: false
+      - run: |
+          test -n "${{ needs.smoke.outputs.vaultwarden_version }}" || exit 1
+          test -n "${{ needs.smoke.outputs.vaultwarden_sha }}" || exit 1
+          echo "SMOKE PASS ${{ needs.smoke.outputs.vaultwarden_version }}"
 
-      - name: Parse web-vault
-        id: webvault_version
-        shell: pwsh
-        working-directory: vaultwarden
-        run: |
-          $l = Select-String -Path docker/DockerSettings.yaml -Pattern '^\s*vault_version:\s*["'']?([^"''\s#]+)' | Select-Object -First 1
-          if (-not $l) { exit 1 }
-          "web_vault_version=$($l.Matches.Groups[1].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+  repeat1:
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat","repeat-build"]'), github.event.inputs.case || '')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: ${{ github.event.inputs.test_version || '1.32.0' }}
+      force_build: true
+      skip_release: true
+      skip_cleanup: true
+      test_case: REPEAT-1
+    permissions:
+      contents: write
+    secrets: inherit
 
-      - name: Restore web-vault
-        id: webvault_cache
-        uses: actions/cache/restore@v5
-        with:
-          path: web-vault
-          key: web-vault-${{ steps.webvault_version.outputs.web_vault_version }}-Windows-v3
+  repeat2:
+    needs: [repeat1]
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat","repeat-build"]'), github.event.inputs.case || '')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: ${{ github.event.inputs.test_version || '1.32.0' }}
+      force_build: true
+      skip_release: true
+      skip_cleanup: true
+      test_case: REPEAT-2
+    permissions:
+      contents: write
+    secrets: inherit
 
-      - name: Download web-vault
-        if: steps.webvault_cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        env:
-          WEB_VAULT_VERSION: ${{ steps.webvault_version.outputs.web_vault_version }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference='Stop'
-          $v=$env:WEB_VAULT_VERSION
-          $h=@{Authorization="Bearer $env:GITHUB_TOKEN";"User-Agent"="vw-v3"}
-          $t=[uri]::EscapeDataString($v)
-          $r=$null
-          try { $r=Invoke-RestMethod "https://api.github.com/repos/dani-garcia/bw_web_builds/releases/tags/$t" -Headers $h -MaximumRetryCount 3 -RetryIntervalSec 5 } catch {}
-          if(-not $r){ 1..5|%{ $ls=Invoke-RestMethod "https://api.github.com/repos/dani-garcia/bw_web_builds/releases?per_page=100&page=$_" -Headers $h; $hit=$ls|Where-Object tag_name -eq $v|Select-Object -First 1; if($hit){$r=$hit;break} } }
-          if(-not $r){ exit 1 }
-          $a=$r.assets|Where-Object name -like '*.tar.gz'|Select-Object -First 1
-          Invoke-WebRequest $a.browser_download_url -OutFile $a.name -Headers $h
-          if(Test-Path web-vault){ Remove-Item -Recurse -Force web-vault }
-          tar -xf $a.name
-          if(-not (Test-Path web-vault/index.html)){ $f=Get-ChildItem -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName 'index.html') } | Select-Object -First 1; if($f){ Move-Item $f.FullName web-vault -Force } }
-          if(-not (Test-Path web-vault/index.html)){ exit 1 }
+  repeat-assert:
+    needs: [repeat1, repeat2]
+    if: always() && github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat","repeat-build"]'), github.event.inputs.case || '')
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "r1 ${{ needs.repeat1.outputs.vaultwarden_sha }}"
+          echo "r2 ${{ needs.repeat2.outputs.vaultwarden_sha }}"
+          test -n "${{ needs.repeat1.outputs.vaultwarden_sha }}"
+          test -n "${{ needs.repeat2.outputs.vaultwarden_sha }}"
+          echo "repeat PASS – no 422"
 
-      - name: Save web-vault
-        if: steps.webvault_cache.outputs.cache-hit != 'true' && success()
-        uses: actions/cache/save@v5
-        with:
-          path: web-vault
-          key: web-vault-${{ steps.webvault_version.outputs.web_vault_version }}-Windows-v3
+  cache1:
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","cache","cache-hit"]'), github.event.inputs.case || '')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: ${{ github.event.inputs.test_version || '1.32.0' }}
+      force_build: true
+      skip_release: true
+      skip_cleanup: true
+      test_case: CACHE-1
+    permissions:
+      contents: write
+    secrets: inherit
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+  cache2:
+    needs: [cache1]
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","cache","cache-hit"]'), github.event.inputs.case || '')
+    uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
+    with:
+      tag_choice: custom
+      tag: ${{ github.event.inputs.test_version || '1.32.0' }}
+      force_build: true
+      skip_release: true
+      skip_cleanup: true
+      test_case: CACHE-2
+    permissions:
+      contents: write
+    secrets: inherit
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vaultwarden -> target
-          cache-bin: false
-          shared-key: vw-rust-Windows-v3
+  summary:
+    needs:
+      - check-release
+      - check-latest
+      - inject-bad-assert
+      - inject-traversal-assert
+      - inject-command-assert
+      - smoke-assert
+      - repeat-assert
+      - cache2
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          # Vaultwarden v3 test
 
-      - name: vcpkg version
-        id: vcpkg_version
-        shell: pwsh
-        run: |
-          $v=vcpkg version | Select-Object -First 1
-          if($v -match '-([a-f0-9]{12,})'){ $c=$matches[1].Substring(0,12) } else { $c='unknown' }
-          "commit=$c" | Out-File $env:GITHUB_OUTPUT -Append
-          "month=$(Get-Date -Format 'yyyy-MM')" | Out-File $env:GITHUB_OUTPUT -Append
-
-      - name: Restore vcpkg
-        uses: actions/cache/restore@v5
-        with:
-          path: C:\vcpkg\installed\x64-windows-static
-          key: vcpkg-openssl-static-${{ steps.vcpkg_version.outputs.commit }}-Windows-${{ steps.vcpkg_version.outputs.month }}-v3
-          restore-keys: |
-            vcpkg-openssl-static-Windows-
-
-      - name: check openssl
-        id: vcpkg_check
-        shell: pwsh
-        run: |
-          "skip_vcpkg=$((Test-Path 'C:\vcpkg\installed\x64-windows-static\lib\libcrypto.lib').ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append
-
-      - name: vcpkg integrate
-        shell: pwsh
-        run: vcpkg integrate install
-
-      - name: vcpkg install
-        if: steps.vcpkg_check.outputs.skip_vcpkg != 'true'
-        shell: pwsh
-        run: vcpkg install openssl:x64-windows-static --clean-after-build
-
-      - name: cargo build
-        shell: pwsh
-        working-directory: vaultwarden
-        env:
-          RUSTFLAGS: "-Ctarget-feature=+crt-static -Cstrip=debuginfo"
-        run: cargo build --locked --no-default-features --features sqlite --release
-
-      - name: save vcpkg
-        if: steps.vcpkg_check.outputs.skip_vcpkg != 'true' && success()
-        uses: actions/cache/save@v5
-        with:
-          path: C:\vcpkg\installed\x64-windows-static
-          key: vcpkg-openssl-static-${{ steps.vcpkg_version.outputs.commit }}-Windows-${{ steps.vcpkg_version.outputs.month }}-v3
-
-      - name: get version
-        id: get_version
-        shell: pwsh
-        working-directory: vaultwarden
-        run: |
-          $d = (& git describe --tags --always --long) 2>$null
-          $sha = (& git rev-parse --short=12 HEAD).Trim()
-          $ver=$null
-          if($d -match '^([^\s-]+?)(?:-\d+-g[0-9a-f]+)?'){ $ver=$matches[1] }
-          if(-not $ver -or $ver -match '^[0-9a-f]{7,}$|^g[0-9a-f]'){ $ver="0.0.0+$sha" }
-          if($ver -match '^\d'){ $ver="v$ver" }
-          "vaultwarden_version=$ver" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "vaultwarden_short_sha=$sha" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Move-Item -Force .\target\release\vaultwarden.exe $env:GITHUB_WORKSPACE\vaultwarden.exe
-
-      - name: smoke
-        shell: pwsh
-        run: |
-          Test-Path vaultwarden.exe -ErrorAction Stop | Out-Null
-          Test-Path web-vault/index.html -ErrorAction Stop | Out-Null
-
-      - name: zip
-        shell: pwsh
-        run: |
-          Compress-Archive -Path vaultwarden.exe,web-vault -DestinationPath vaultwarden.zip -Force -CompressionLevel Optimal
-          $s=[math]::Round((Get-Item vaultwarden.zip).Length/1MB,2)
-          "ZIP_SIZE_MB=$s" | Out-File $env:GITHUB_ENV -Append
-          $h=(Get-FileHash vaultwarden.zip -Algorithm SHA256).Hash.ToLower()
-          "ZIP_SHA256=$h" | Out-File $env:GITHUB_ENV -Append
-
-      - name: upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: vaultwarden-${{ steps.get_version.outputs.vaultwarden_version }}-r${{ github.run_number }}
-          path: vaultwarden.zip
-          retention-days: 14
-          if-no-files-found: error
-          compression-level: 0
-
-      - name: release tag
-        id: set_release_tag
-        shell: bash
-        run: |
-          ver="${{ steps.get_version.outputs.vaultwarden_version }}"
-          sha="${{ steps.get_version.outputs.vaultwarden_short_sha }}"
-          safe="${ver//+/-build.}"
-          echo "release_tag=vw-win-${safe}-${sha}-r${{ github.run_number }}" >> "$GITHUB_OUTPUT"
-
-      - name: Create Release
-        if: env.SKIP_RELEASE != 'true'
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.set_release_tag.outputs.release_tag }}
-          name: Vaultwarden ${{ steps.get_version.outputs.vaultwarden_version }}
-          body: |
-            Vaultwarden ${{ steps.get_version.outputs.vaultwarden_version }}
-            Commit ${{ steps.get_version.outputs.vaultwarden_short_sha }}
-            Web ${{ steps.webvault_version.outputs.web_vault_version }}
-            Size ${{ env.ZIP_SIZE_MB }} MB
-            SHA256 ${{ env.ZIP_SHA256 }}
-          files: vaultwarden.zip
-          make_latest: true
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Cleanup
-        if: success() && env.SKIP_CLEANUP != 'true' && env.SKIP_RELEASE != 'true'
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CURRENT_TAG: ${{ steps.set_release_tag.outputs.release_tag }}
-          REPO: ${{ github.repository }}
-        run: |
-          $h=@{Authorization="Bearer $env:GITHUB_TOKEN";"User-Agent"="vw-v3"}
-          $all=@(); 1..20|%{ $r=Invoke-RestMethod "https://api.github.com/repos/$env:REPO/releases?per_page=100&page=$_" -Headers $h -ErrorAction SilentlyContinue; if(-not $r){break}; $all+=$r|?{ $_.tag_name -like 'vw-win-*' -and -not $_.draft -and -not $_.prerelease }; if($r.Count -lt 100){break} }
-          $g=$all|Group-Object { if($_.tag_name -match '^vw-win-(.+?)-[0-9a-f]{7,}'){ $matches[1] } else { 'unknown' } }
-          foreach($gr in $g){ $s=$gr.Group|Sort-Object published_at -Descending; if($s.Count -le 1){continue}; $td=$s|select -Skip 1|? tag_name -ne $env:CURRENT_TAG; foreach($x in $td){ try{ Invoke-RestMethod -Method Delete "https://api.github.com/repos/$env:REPO/releases/$($x.id)" -Headers $h |Out-Null; Invoke-RestMethod -Method Delete "https://api.github.com/repos/$env:REPO/git/refs/tags/$($x.tag_name)" -Headers $h |Out-Null }catch{}; Start-Sleep -Milliseconds 300 } }
+          | test | result |
+          |---|---|
+          | check-release | ${{ needs.check-release.result }} |
+          | check-latest | ${{ needs.check-latest.result }} |
+          | inject-bad | ${{ needs.inject-bad-assert.result }} |
+          | traversal | ${{ needs.inject-traversal-assert.result }} |
+          | command | ${{ needs.inject-command-assert.result }} |
+          | smoke | ${{ needs.smoke-assert.result }} |
+          | repeat | ${{ needs.repeat-assert.result }} |
+          | cache | ${{ needs.cache2.result }} |
+          EOF
+          fail=0
+          for r in "${{ needs.check-release.result }}" "${{ needs.check-latest.result }}" "${{ needs.inject-bad-assert.result }}" "${{ needs.inject-traversal-assert.result }}" "${{ needs.inject-command-assert.result }}"; do
+            case "$r" in success) ;; skipped) ;; *) fail=1 ;; esac
+          done
+          [ $fail -eq 0 ] && echo "PASS" >> $GITHUB_STEP_SUMMARY || { echo "FAIL" >> $GITHUB_STEP_SUMMARY; exit 1; }
