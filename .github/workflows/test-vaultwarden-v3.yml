@@ -31,7 +31,9 @@ name: Test Vaultwarden v3
   schedule:
     - cron: '0 6 * * *'
 
-permissions: {}
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   test-check-release:
