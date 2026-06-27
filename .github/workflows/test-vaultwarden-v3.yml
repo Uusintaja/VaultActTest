@@ -26,14 +26,15 @@ name: Test Vaultwarden v3
         description: Test version tag
         required: false
         default: "1.32.0"
-  schedule:
-    - cron: '0 6 * * *'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  # ---- fast checks, dry_run=true guarantees no build job starts ----
+  # ---- fast checks ----
+  # NOTE: reusable workflow 'build' job requires contents: write,
+  # even when dry_run=true, because GitHub validates permissions
+  # statically before evaluating if:. So caller MUST grant write.
   check-release:
     if: github.event_name == 'schedule' || contains(fromJSON('["all-fast","check-only","all","full-matrix","check-release"]'), github.event.inputs.case || 'all-fast')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
@@ -42,7 +43,7 @@ jobs:
       dry_run: true
       test_case: T1-check-release
     permissions:
-      contents: read
+      contents: write
     secrets: inherit
 
   check-latest:
@@ -53,12 +54,11 @@ jobs:
       dry_run: true
       test_case: T2-check-latest
     permissions:
-      contents: read
+      contents: write
     secrets: inherit
 
-  # ---- injection tests – expect check job to FAIL ----
   inject-bad:
-    if: contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad","inject-bad-tag"]'), github.event.inputs.case || 'all-fast')
+    if: contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad"]'), github.event.inputs.case || 'all-fast')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -66,27 +66,23 @@ jobs:
       dry_run: true
       test_case: T3-inject
     permissions:
-      contents: read
+      contents: write
     secrets: inherit
 
   inject-bad-assert:
     needs: [inject-bad]
-    if: always() && contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad","inject-bad-tag"]'), github.event.inputs.case || 'all-fast')
+    if: always() && contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad"]'), github.event.inputs.case || 'all-fast')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: |
           r="${{ needs.inject-bad.result }}"
-          echo "inject-bad result=$r"
-          if [ "$r" = "failure" ]; then
-            echo "PASS injection rejected"
-            exit 0
-          else
-            echo "FAIL expected failure, got $r"
-            exit 1
-          fi
+          echo "result=$r"
+          if [ "$r" = "failure" ]; then echo "PASS injection rejected"; exit 0; else echo "FAIL expected failure got $r"; exit 1; fi
 
   inject-traversal:
-    if: contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-path-traversal","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    if: contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad"]'), github.event.inputs.case || 'all-fast')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -94,20 +90,22 @@ jobs:
       dry_run: true
       test_case: T4-traversal
     permissions:
-      contents: read
+      contents: write
     secrets: inherit
 
   inject-traversal-assert:
     needs: [inject-traversal]
-    if: always() && contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-path-traversal","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    if: always() && contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad"]'), github.event.inputs.case || 'all-fast')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: |
           r="${{ needs.inject-traversal.result }}"
-          test "$r" = "failure" && echo "PASS" || { echo "FAIL $r"; exit 1; }
+          [ "$r" = "failure" ] && echo PASS || { echo "FAIL $r"; exit 1; }
 
   inject-command:
-    if: contains(fromJSON('["all-fast","all","full-matrix","inject-command","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    if: contains(fromJSON('["all-fast","all","full-matrix","inject-bad"]'), github.event.inputs.case || 'all-fast')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -115,21 +113,23 @@ jobs:
       dry_run: true
       test_case: T5-cmd
     permissions:
-      contents: read
+      contents: write
     secrets: inherit
 
   inject-command-assert:
     needs: [inject-command]
-    if: always() && contains(fromJSON('["all-fast","all","full-matrix","inject-command","inject-bad"]'), github.event.inputs.case || 'all-fast')
+    if: always() && contains(fromJSON('["all-fast","all","full-matrix","inject-bad"]'), github.event.inputs.case || 'all-fast')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: |
           r="${{ needs.inject-command.result }}"
-          test "$r" = "failure" && echo "PASS" || { echo "FAIL $r"; exit 1; }
+          [ "$r" = "failure" ] && echo PASS || { echo "FAIL $r"; exit 1; }
 
-  # ---- real builds – gated by run_full_build ----
+  # ---- real builds ----
   smoke:
-    if: (github.event.inputs.run_full_build == 'true') && contains(fromJSON('["all","full-matrix","smoke","smoke-old-version"]'), github.event.inputs.case || '')
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","smoke"]'), github.event.inputs.case || '')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -144,16 +144,18 @@ jobs:
 
   smoke-assert:
     needs: [smoke]
-    if: always() && github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","smoke","smoke-old-version"]'), github.event.inputs.case || '')
+    if: always() && github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","smoke"]'), github.event.inputs.case || '')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: |
           test -n "${{ needs.smoke.outputs.vaultwarden_version }}" || exit 1
           test -n "${{ needs.smoke.outputs.vaultwarden_sha }}" || exit 1
-          echo "SMOKE PASS ${{ needs.smoke.outputs.vaultwarden_version }}"
+          echo "SMOKE PASS"
 
   repeat1:
-    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat","repeat-build"]'), github.event.inputs.case || '')
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat"]'), github.event.inputs.case || '')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -168,7 +170,7 @@ jobs:
 
   repeat2:
     needs: [repeat1]
-    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat","repeat-build"]'), github.event.inputs.case || '')
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat"]'), github.event.inputs.case || '')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -183,18 +185,20 @@ jobs:
 
   repeat-assert:
     needs: [repeat1, repeat2]
-    if: always() && github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat","repeat-build"]'), github.event.inputs.case || '')
+    if: always() && github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","repeat"]'), github.event.inputs.case || '')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: |
           echo "r1 ${{ needs.repeat1.outputs.vaultwarden_sha }}"
-          echo "r2 ${{ needs.repeat2.outputs.vaultwarden_sha }}"
+          echo "r2 ${{ needs.repeat2.outputs.vaultwarder_sha || needs.repeat2.outputs.vaultwarden_sha }}"
           test -n "${{ needs.repeat1.outputs.vaultwarden_sha }}"
           test -n "${{ needs.repeat2.outputs.vaultwarden_sha }}"
-          echo "repeat PASS – no 422"
+          echo PASS
 
   cache1:
-    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","cache","cache-hit"]'), github.event.inputs.case || '')
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","cache"]'), github.event.inputs.case || '')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -209,7 +213,7 @@ jobs:
 
   cache2:
     needs: [cache1]
-    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","cache","cache-hit"]'), github.event.inputs.case || '')
+    if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","cache"]'), github.event.inputs.case || '')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
     with:
       tag_choice: custom
@@ -234,24 +238,22 @@ jobs:
       - cache2
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: |
-          cat <<EOF >> $GITHUB_STEP_SUMMARY
-          # Vaultwarden v3 test
-
-          | test | result |
-          |---|---|
-          | check-release | ${{ needs.check-release.result }} |
-          | check-latest | ${{ needs.check-latest.result }} |
-          | inject-bad | ${{ needs.inject-bad-assert.result }} |
-          | traversal | ${{ needs.inject-traversal-assert.result }} |
-          | command | ${{ needs.inject-command-assert.result }} |
-          | smoke | ${{ needs.smoke-assert.result }} |
-          | repeat | ${{ needs.repeat-assert.result }} |
-          | cache | ${{ needs.cache2.result }} |
+          cat <<EOF
+          check-release: ${{ needs.check-release.result }}
+          check-latest: ${{ needs.check-latest.result }}
+          inject-bad: ${{ needs.inject-bad-assert.result }}
+          traversal: ${{ needs.inject-traversal-assert.result }}
+          command: ${{ needs.inject-command-assert.result }}
+          smoke: ${{ needs.smoke-assert.result }}
+          repeat: ${{ needs.repeat-assert.result }}
+          cache: ${{ needs.cache2.result }}
           EOF
-          fail=0
+          # fast tests must pass, others may be skipped
           for r in "${{ needs.check-release.result }}" "${{ needs.check-latest.result }}" "${{ needs.inject-bad-assert.result }}" "${{ needs.inject-traversal-assert.result }}" "${{ needs.inject-command-assert.result }}"; do
-            case "$r" in success) ;; skipped) ;; *) fail=1 ;; esac
+            case "$r" in success) ;; skipped) ;; *) echo "FAIL $r"; exit 1;; esac
           done
-          [ $fail -eq 0 ] && echo "PASS" >> $GITHUB_STEP_SUMMARY || { echo "FAIL" >> $GITHUB_STEP_SUMMARY; exit 1; }
+          echo "PASS"
