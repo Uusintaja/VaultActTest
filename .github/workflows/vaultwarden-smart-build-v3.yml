@@ -1,20 +1,15 @@
-# Vaultwarden Smart Build v3.2
-# Reusable + dispatch + schedule
-# P0-P2 fixes applied, act / GitHub Actions schema clean
-#
-# SECURITY NOTE for reusable workflow callers:
-#   The build job requires `contents: write` (to create releases).
-#   Therefore ANY caller job that uses:
-#     uses: your-org/your-repo/.github/workflows/vaultwarden-smart-build-v3.yml@...
-#   MUST declare:
+name: Vaultwarden Smart Build v3
+
+# Reusable workflow security note:
+#   The build job needs `contents: write` to create releases.
+#   Callers MUST declare:
 #     permissions:
 #       contents: write
-#   even if you set dry_run=true / skip_release=true.
-#   GitHub validates permissions statically before evaluating `if:`.
-#   If you truly need read-only, fork the workflow and remove the
-#   `permissions: contents: write` line from the build job.
-
-name: Vaultwarden Smart Build v3
+#   even if you use dry_run / skip_release – GitHub validates
+#   permissions statically before evaluating `if:`.
+#
+#   Do NOT declare `secrets: GITHUB_TOKEN` in workflow_call –
+#   GITHUB_TOKEN is reserved and will fail validation.
 
 on:
   schedule:
@@ -28,7 +23,7 @@ on:
         type: choice
         options: [release, latest, custom]
       tag:
-        description: Custom commit / tag / branch
+        description: Custom ref
         required: false
         default: ""
       force_build:
@@ -37,7 +32,7 @@ on:
         default: false
         type: boolean
       skip_release:
-        description: Build only – skip Release creation
+        description: Build only – skip Release
         required: false
         default: false
         type: boolean
@@ -83,6 +78,7 @@ on:
         type: string
     outputs:
       should_build:
+        description: "Whether build would run"
         value: ${{ jobs.check.outputs.should_build }}
       vaultwarden_version:
         value: ${{ jobs.build.outputs.vaultwarden_version }}
@@ -94,18 +90,14 @@ on:
         value: ${{ jobs.build.outputs.web_vault_version }}
       zip_size_mb:
         value: ${{ jobs.build.outputs.zip_size_mb }}
-    secrets:
-      # allow secrets: inherit to pass GITHUB_TOKEN through
-      GITHUB_TOKEN:
-        required: false
-
-# default minimal permissions – jobs override
-permissions:
-  contents: read
+    # NO secrets: block here – GITHUB_TOKEN is reserved and breaks validation
 
 concurrency:
-  group: vw-v3-${{ github.event.inputs.tag_choice || inputs.tag_choice || 'schedule' }}-${{ github.event.inputs.tag || inputs.tag || 'auto' }}
+  group: vw-v3-${{ github.event.inputs.tag_choice || inputs.tag_choice || 'schedule' }}
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   check:
@@ -161,7 +153,7 @@ jobs:
           dry_run=$dry_run
           test_case=$test_case
           EOF
-          echo "::notice::inputs tag_choice=$tag_choice tag=$tag force=$force_build dry_run=$dry_run skip_release=$skip_release"
+          echo "::notice::inputs choice=$tag_choice tag=$tag force=$force_build dry_run=$dry_run"
 
       - name: Get latest upstream
         id: get_latest_tag
@@ -198,18 +190,22 @@ jobs:
           DRY_RUN: ${{ steps.flags.outputs.dry_run }}
         run: |
           set -euo pipefail
-          should_build=true; reason=manual
+          should_build=true
+          reason=manual
           if [ "$FORCE_BUILD" = "true" ]; then
             should_build=true; reason=force
           elif [ "$EVENT_NAME" = "schedule" ] || [ "$TAG_CHOICE" = "release" ]; then
-            latest="$LATEST_TAG"; [ -z "$latest" ] && exit 1
-            ver=${latest#v}; found=false
+            latest="$LATEST_TAG"
+            [ -z "$latest" ] && { echo "::error::latest_tag empty"; exit 1; }
+            ver=${latest#v}
+            found=false
             for p in 1 2; do
               j=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" -H "User-Agent: vw-v3" "https://api.github.com/repos/$REPO/releases?per_page=100&page=$p" || echo '[]')
               if echo "$j" | jq -r '.[].tag_name' | grep -Eq "^vw-win-v?$ver[.-]"; then found=true; break; fi
             done
             if [ "$found" = true ]; then should_build=false; reason="already built $latest"; else should_build=true; reason="new $latest"; fi
           fi
+          # dry_run hard override – prevents build job from starting
           if [ "${DRY_RUN:-false}" = "true" ]; then
             should_build=false
             reason="$reason+dry_run"
@@ -227,7 +223,8 @@ jobs:
           LATEST_TAG: ${{ steps.get_latest_tag.outputs.latest_tag }}
         run: |
           set -euo pipefail
-          choice="$TAG_CHOICE"; [ "$EVENT_NAME" = "schedule" ] && choice=release
+          choice="$TAG_CHOICE"
+          [ "$EVENT_NAME" = "schedule" ] && choice=release
           tag=""
           case "$choice" in
             release) tag="$LATEST_TAG"; [ -z "$tag" ] && exit 1 ;;
@@ -235,30 +232,36 @@ jobs:
             custom)
               tag="$CUSTOM_TAG"
               [ -z "$tag" ] && { echo "::error::custom tag required"; exit 1; }
-              echo "$tag" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$' || { echo "::error::invalid chars: $tag"; exit 1; }
-              echo "$tag" | grep -Eq '(\.\.|//)|^[.-]|[-.]$' && { echo "::error::forbidden sequence $tag"; exit 1; } || true
+              echo "$tag" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$' || { echo "::error::invalid chars in tag: $tag"; exit 1; }
+              echo "$tag" | grep -Eq '(\.\.|//)|^[.-]|[-.]$' && { echo "::error::forbidden sequence in tag: $tag"; exit 1; } || true
               ;;
-            *) exit 1 ;;
+            *) echo "::error::unknown tag_choice $choice"; exit 1 ;;
           esac
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "tag_choice=$choice" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         run: |
-          echo "### Vaultwarden v3 check" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| key | value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| should_build | ${{ steps.version_check.outputs.should_build }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| reason | ${{ steps.version_check.outputs.reason }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| tag_choice | ${{ steps.target_version.outputs.tag_choice }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| target_tag | \`${{ steps.target_version.outputs.tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Vaultwarden Smart Build v3 – check"
+            echo ""
+            if [ -n "${{ steps.flags.outputs.test_case }}" ]; then echo "**test_case:** \`${{ steps.flags.outputs.test_case }}\`"; echo ""; fi
+            echo "| key | value |"
+            echo "|---|---|"
+            echo "| should_build | ${{ steps.version_check.outputs.should_build }} |"
+            echo "| reason | ${{ steps.version_check.outputs.reason }} |"
+            echo "| tag_choice | ${{ steps.target_version.outputs.tag_choice }} |"
+            echo "| target_tag | \`${{ steps.target_version.outputs.tag }}\` |"
+            echo "| latest_tag | \`${{ steps.get_latest_tag.outputs.latest_tag }}\` |"
+            echo "| force_build | ${{ steps.flags.outputs.force_build }} |"
+            echo "| dry_run | ${{ steps.flags.outputs.dry_run }} |"
+            echo "| skip_release | ${{ steps.flags.outputs.skip_release }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: check
-    # CRITICAL: this job requests contents: write.
-    # Callers MUST grant contents: write, even if dry_run=true,
-    # because GitHub validates permissions statically.
+    # requires contents: write – callers MUST grant this,
+    # even with dry_run/skip_release, GitHub validates statically
     if: needs.check.outputs.should_build == 'true'
     runs-on: windows-latest
     timeout-minutes: 120
@@ -315,7 +318,7 @@ jobs:
           $t=[uri]::EscapeDataString($v)
           $r=$null
           try { $r=Invoke-RestMethod "https://api.github.com/repos/dani-garcia/bw_web_builds/releases/tags/$t" -Headers $h -MaximumRetryCount 3 -RetryIntervalSec 5 } catch {}
-          if(-not $r){ 1..5 | ForEach-Object { $ls=Invoke-RestMethod "https://api.github.com/repos/dani-garcia/bw_web_builds/releases?per_page=100&page=$_" -Headers $h; $hit=$ls | Where-Object tag_name -eq $v | Select-Object -First 1; if($hit){ $r=$hit; break } } }
+          if(-not $r){ 1..5 | ForEach-Object { $ls=Invoke-RestMethod "https://api.github.com/repos/dani-garcia/bw_web_builds/releases?per_page=100&page=$_ " -Headers $h; $hit=$ls | Where-Object tag_name -eq $v | Select-Object -First 1; if($hit){ $r=$hit; break } } }
           if(-not $r){ Write-Error "no web-vault $v"; exit 1 }
           $a=$r.assets | Where-Object name -like '*.tar.gz' | Select-Object -First 1
           Invoke-WebRequest $a.browser_download_url -OutFile $a.name -Headers $h
@@ -394,7 +397,7 @@ jobs:
         run: |
           $d = (& git describe --tags --always --long) 2>$null
           $sha = (& git rev-parse --short=12 HEAD).Trim()
-          $ver = $null
+          $ver=$null
           if($d -match '^([^\s-]+?)(?:-\d+-g[0-9a-f]+)?'){ $ver=$matches[1] }
           if(-not $ver -or $ver -match '^[0-9a-f]{7,}$|^g[0-9a-f]'){ $ver="0.0.0+$sha" }
           if($ver -match '^\d'){ $ver="v$ver" }
@@ -462,6 +465,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           $h=@{Authorization="Bearer $env:GITHUB_TOKEN";"User-Agent"="vw-v3"}
-          $all=@(); 1..20|%{ $r=Invoke-RestMethod "https://api.github.com/repos/$env:REPO/releases?per_page=100&page=$_ " -Headers $h -ErrorAction SilentlyContinue; if(-not $r){break}; $all+=$r|Where-Object { $_.tag_name -like 'vw-win-*' -and -not $_.draft -and -not $_.prerelease }; if($r.Count -lt 100){break} }
+          $all=@(); 1..20|%{ $r=Invoke-RestMethod "https://api.github.com/repos/$env:REPO/releases?per_page=100&page=$_" -Headers $h -ErrorAction SilentlyContinue; if(-not $r){break}; $all+=$r|Where-Object { $_.tag_name -like 'vw-win-*' -and -not $_.draft -and -not $_.prerelease }; if($r.Count -lt 100){break} }
           $g=$all|Group-Object { if($_.tag_name -match '^vw-win-(.+?)-[0-9a-f]{7,}'){ $matches[1] } else { 'unknown' } }
           foreach($gr in $g){ $s=$gr.Group|Sort-Object published_at -Descending; if($s.Count -le 1){continue}; $td=$s|Select-Object -Skip 1|Where-Object tag_name -ne $env:CURRENT_TAG; foreach($x in $td){ try{ Invoke-RestMethod -Method Delete "https://api.github.com/repos/$env:REPO/releases/$($x.id)" -Headers $h |Out-Null; Invoke-RestMethod -Method Delete "https://api.github.com/repos/$env:REPO/git/refs/tags/$($x.tag_name)" -Headers $h |Out-Null }catch{}; Start-Sleep -Milliseconds 300 } }
