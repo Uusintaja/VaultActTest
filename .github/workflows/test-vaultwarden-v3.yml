@@ -26,15 +26,15 @@ name: Test Vaultwarden v3
         description: Test version tag
         required: false
         default: "1.32.0"
+  schedule:
+    - cron: '0 6 * * *'
 
+# IMPORTANT: reusable workflow build job needs contents: write
+# GitHub validates this statically, even with dry_run=true
 permissions:
   contents: write
 
 jobs:
-  # ---- fast checks ----
-  # NOTE: reusable workflow 'build' job requires contents: write,
-  # even when dry_run=true, because GitHub validates permissions
-  # statically before evaluating if:. So caller MUST grant write.
   check-release:
     if: github.event_name == 'schedule' || contains(fromJSON('["all-fast","check-only","all","full-matrix","check-release"]'), github.event.inputs.case || 'all-fast')
     uses: ./.github/workflows/vaultwarden-smart-build-v3.yml
@@ -78,8 +78,14 @@ jobs:
     steps:
       - run: |
           r="${{ needs.inject-bad.result }}"
-          echo "result=$r"
-          if [ "$r" = "failure" ]; then echo "PASS injection rejected"; exit 0; else echo "FAIL expected failure got $r"; exit 1; fi
+          echo "inject-bad result=$r"
+          if [ "$r" = "failure" ]; then
+            echo "PASS injection rejected"
+            exit 0
+          else
+            echo "FAIL expected failure got $r"
+            exit 1
+          fi
 
   inject-traversal:
     if: contains(fromJSON('["all-fast","check-only","all","full-matrix","inject-bad"]'), github.event.inputs.case || 'all-fast')
@@ -192,10 +198,10 @@ jobs:
     steps:
       - run: |
           echo "r1 ${{ needs.repeat1.outputs.vaultwarden_sha }}"
-          echo "r2 ${{ needs.repeat2.outputs.vaultwarder_sha || needs.repeat2.outputs.vaultwarden_sha }}"
+          echo "r2 ${{ needs.repeat2.outputs.vaultwarden_sha }}"
           test -n "${{ needs.repeat1.outputs.vaultwarden_sha }}"
           test -n "${{ needs.repeat2.outputs.vaultwarden_sha }}"
-          echo PASS
+          echo "repeat PASS"
 
   cache1:
     if: github.event.inputs.run_full_build == 'true' && contains(fromJSON('["all","full-matrix","cache"]'), github.event.inputs.case || '')
@@ -242,7 +248,7 @@ jobs:
       contents: read
     steps:
       - run: |
-          cat <<EOF
+          cat <<'EOF'
           check-release: ${{ needs.check-release.result }}
           check-latest: ${{ needs.check-latest.result }}
           inject-bad: ${{ needs.inject-bad-assert.result }}
@@ -252,8 +258,8 @@ jobs:
           repeat: ${{ needs.repeat-assert.result }}
           cache: ${{ needs.cache2.result }}
           EOF
-          # fast tests must pass, others may be skipped
+          fail=0
           for r in "${{ needs.check-release.result }}" "${{ needs.check-latest.result }}" "${{ needs.inject-bad-assert.result }}" "${{ needs.inject-traversal-assert.result }}" "${{ needs.inject-command-assert.result }}"; do
-            case "$r" in success) ;; skipped) ;; *) echo "FAIL $r"; exit 1;; esac
+            case "$r" in success|skipped) ;; *) fail=1 ;; esac
           done
-          echo "PASS"
+          exit $fail
